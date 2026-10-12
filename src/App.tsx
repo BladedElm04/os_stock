@@ -33,6 +33,15 @@ type DbOrder = {
   valor_mao_obra: number | string;
   desconto: number | string;
   garantia_dias: number;
+  ordens_servico_pecas: {
+    id: number;
+    peca_id: number;
+    quantidade: number | string;
+    valor_unitario: number | string;
+    nome_peca: string;
+    codigo_peca: string | null;
+    status: 'em_uso' | 'devolvida';
+  }[];
   clientes: {
     nome: string;
     telefone: string | null;
@@ -81,6 +90,15 @@ type Order = {
   equipmentSerial: string | null;
   equipmentColor: string | null;
   equipmentAccessories: string | null;
+  parts: {
+    id: number;
+    partId: number;
+    name: string;
+    code: string | null;
+    quantity: number;
+    unitPrice: number;
+    status: 'em_uso' | 'devolvida';
+  }[];
 };
 
 type StockItem = {
@@ -160,6 +178,24 @@ type ReportOrder = {
   status: Status;
   valor_total: number | string;
   data_entrada: string;
+};
+
+type ReportMovement = {
+  id: number;
+  peca_id: number;
+  tipo: string;
+  quantidade: number | string;
+  motivo: string | null;
+  criado_em: string;
+  pecas: {
+    nome: string;
+    codigo: string | null;
+    unidade: string;
+  } | {
+    nome: string;
+    codigo: string | null;
+    unidade: string;
+  }[] | null;
 };
 
 const statusInfo: Record<Status, { label: string; css: string }> = {
@@ -269,10 +305,12 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
   const [orderPriority, setOrderPriority] = useState('normal');
   const [orderLabor, setOrderLabor] = useState('');
   const [orderDiscount, setOrderDiscount] = useState('');
+  const [orderPartQuantities, setOrderPartQuantities] = useState<Record<number, string>>({});
   const [orderDueDate, setOrderDueDate] = useState('');
   const [stockMoveItem, setStockMoveItem] = useState<StockItem | null>(null);
   const [stockMoveType, setStockMoveType] = useState<'entrada' | 'saida'>('entrada');
   const [stockMoveQuantity, setStockMoveQuantity] = useState('');
+  const [stockMoveError, setStockMoveError] = useState('');
   const [stockMoveReason, setStockMoveReason] = useState('');
   const [newPartCode, setNewPartCode] = useState('');
   const [newPartName, setNewPartName] = useState('');
@@ -282,6 +320,7 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
     `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`
   );
   const [reportOrders, setReportOrders] = useState<ReportOrder[]>([]);
+  const [reportMovements, setReportMovements] = useState<ReportMovement[]>([]);
   const [reportsLoading, setReportsLoading] = useState(false);
   const [reportsError, setReportsError] = useState('');
   const [profileName, setProfileName] = useState('');
@@ -316,6 +355,9 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
             valor_mao_obra,
             desconto,
             garantia_dias,
+            ordens_servico_pecas (
+              id, peca_id, quantidade, valor_unitario, nome_peca, codigo_peca, status
+            ),
             clientes ( nome, telefone, email, cpf_cnpj, cep, endereco, numero_endereco, complemento, bairro, cidade, estado ),
             equipamentos ( tipo, marca, modelo, numero_serie, cor, acessorios )
           `)
@@ -399,6 +441,15 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
         equipmentSerial: row.equipamentos?.numero_serie ?? null,
         equipmentColor: row.equipamentos?.cor ?? null,
         equipmentAccessories: row.equipamentos?.acessorios ?? null,
+        parts: (row.ordens_servico_pecas ?? []).map(part => ({
+          id: part.id,
+          partId: part.peca_id,
+          name: part.nome_peca,
+          code: part.codigo_peca,
+          quantity: Number(part.quantidade),
+          unitPrice: Number(part.valor_unitario),
+          status: part.status,
+        })),
       })));
 
       setStock((stockResult.data ?? []) as StockItem[]);
@@ -525,6 +576,7 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
     setReportsLoading(true);
     setReportsError('');
     setReportOrders([]);
+    setReportMovements([]);
     const [, yearValue, monthValue] = match;
     const year = Number(yearValue);
     const month = Number(monthValue);
@@ -553,7 +605,28 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
         if (batch.length < batchSize) break;
       }
 
+      const movementRows: ReportMovement[] = [];
+      for (let offset = 0; ; offset += batchSize) {
+        const { data, error: queryError } = await supabase
+          .from('movimentacoes_estoque')
+          .select('id, peca_id, tipo, quantidade, motivo, criado_em, pecas ( nome, codigo, unidade )')
+          .gte('criado_em', from)
+          .lt('criado_em', until)
+          .order('criado_em', { ascending: false })
+          .range(offset, offset + batchSize - 1);
+
+        if (queryError) {
+          console.error('Erro ao consultar movimentações de estoque no relatório:', queryError);
+          throw new Error(`Movimentações de estoque: ${queryError.message}`);
+        }
+
+        const batch = (data ?? []) as unknown as ReportMovement[];
+        movementRows.push(...batch);
+        if (batch.length < batchSize) break;
+      }
+
       setReportOrders(rows);
+      setReportMovements(movementRows);
     } catch (err) {
       setReportsError(
         err instanceof Error
@@ -608,6 +681,26 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
   const reportCompletedValue = reportOrders
     .filter(order => order.status === 'entregue')
     .reduce((total, order) => total + Number(order.valor_total ?? 0), 0);
+  const reportMovementTotals = reportMovements.reduce((totals, movement) => {
+    const quantity = Math.abs(Number(movement.quantidade));
+    if (movement.tipo === 'entrada') {
+      totals.incoming += quantity;
+      totals.incomingCount += 1;
+    } else if (movement.tipo === 'saida') {
+      totals.outgoing += quantity;
+      totals.outgoingCount += 1;
+    }
+    return totals;
+  }, { incoming: 0, incomingCount: 0, outgoing: 0, outgoingCount: 0 });
+  const orderPartsTotal = stock.reduce((total, item) => {
+    const quantity = Number(orderPartQuantities[item.id] || 0);
+    return total + (Number.isFinite(quantity) && quantity > 0 ? quantity * Number(item.preco_venda) : 0);
+  }, 0);
+  const laborAmount = Number(orderLabor || 0);
+  const discountAmount = Number(orderDiscount || 0);
+  const discountExceedsLabor = Number.isFinite(laborAmount)
+    && Number.isFinite(discountAmount)
+    && discountAmount > laborAmount;
 
   const saveProfile = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1052,21 +1145,35 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
       return;
     }
 
+    const selectedParts = Object.entries(orderPartQuantities)
+      .filter(([, quantity]) => quantity.trim() !== '')
+      .map(([partId, quantity]) => ({
+        peca_id: Number(partId),
+        quantidade: Number(quantity),
+      }));
+
+    if (selectedParts.some(item =>
+      !Number.isFinite(item.quantidade)
+      || item.quantidade <= 0
+      || !stock.some(part => part.id === item.peca_id && item.quantidade <= Number(part.quantidade_atual))
+    )) {
+      setError('Confira as quantidades das peças; cada quantidade precisa ser maior que zero e não pode exceder o saldo disponível.');
+      return;
+    }
+
     setSaving(true);
     setError('');
     setSuccess('');
 
-    const { error: insertError } = await supabase.from('ordens_servico').insert({
-      cliente_id: Number(orderClientId),
-      equipamento_id: Number(orderEquipmentId),
-      status: 'aberta',
-      prioridade: orderPriority,
-      defeito_relatado: orderProblem.trim() || null,
-      valor_mao_obra: labor,
-      desconto: discount,
-      valor_total: labor - discount,
-      previsao_entrega: orderDueDate || null,
-      criado_por: userId,
+    const { error: insertError } = await supabase.rpc('criar_ordem_com_pecas', {
+      p_cliente_id: Number(orderClientId),
+      p_equipamento_id: Number(orderEquipmentId),
+      p_prioridade: orderPriority,
+      p_defeito_relatado: orderProblem.trim() || null,
+      p_valor_mao_obra: labor,
+      p_desconto: discount,
+      p_previsao_entrega: orderDueDate || null,
+      p_itens: selectedParts,
     });
 
     setSaving(false);
@@ -1080,6 +1187,7 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
     setOrderProblem('');
     setOrderLabor('');
     setOrderDiscount('');
+    setOrderPartQuantities({});
     setOrderDueDate('');
     setSuccess('Ordem de serviço cadastrada.');
     await loadData();
@@ -1091,11 +1199,22 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
 
     const quantity = Number(stockMoveQuantity);
     if (!Number.isFinite(quantity) || quantity <= 0) {
+      setStockMoveError('Informe uma quantidade maior que zero.');
       setError('Informe uma quantidade maior que zero.');
+      return;
+    }
+    if (
+      stockMoveType === 'saida'
+      && quantity > Number(stockMoveItem.quantidade_atual)
+    ) {
+      const message = `Saldo insuficiente. Disponível: ${Number(stockMoveItem.quantidade_atual)} ${stockMoveItem.unidade}; solicitado: ${quantity} ${stockMoveItem.unidade}.`;
+      setStockMoveError(message);
+      setError(message);
       return;
     }
 
     setSaving(true);
+    setStockMoveError('');
     setError('');
     setSuccess('');
 
@@ -1110,13 +1229,16 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
     setSaving(false);
     if (insertError) {
       console.error('Erro ao registrar movimentação de estoque:', insertError);
-      setError(`Não foi possível registrar a movimentação: ${insertError.message}`);
+      const message = `Não foi possível registrar a movimentação: ${insertError.message}`;
+      setStockMoveError(message);
+      setError(message);
       return;
     }
 
     setStockMoveItem(null);
     setStockMoveQuantity('');
     setStockMoveReason('');
+    setStockMoveError('');
     setSuccess('Movimentação de estoque registrada.');
     await loadData();
   };
@@ -1381,6 +1503,11 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
                       </div>
                       <strong>{order.customer}</strong>
                       <p>{order.equipment} · {order.problem}</p>
+                      {order.parts.length > 0 && (
+                        <p className="order-parts-summary">
+                          Peças em uso: {order.parts.map(part => `${part.quantity}× ${part.name}`).join(', ')}
+                        </p>
+                      )}
                     </div>
 
                     <div className="order-meta">
@@ -1507,6 +1634,11 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
                     </div>
                     <strong>{order.customer}</strong>
                     <p>{order.equipment} · {order.problem}</p>
+                    {order.parts.length > 0 && (
+                      <p className="order-parts-summary">
+                        Em uso: {order.parts.map(part => `${part.quantity}× ${part.name}`).join(', ')}
+                      </p>
+                    )}
                   </div>
                   <div className="order-meta">
                     <b>{money(order.value)}</b>
@@ -1624,6 +1756,9 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
                             type="button"
                             onClick={() => {
                               setStockMoveItem(item);
+                              setStockMoveError('');
+                              setStockMoveQuantity('');
+                              setStockMoveType('entrada');
                               setError('');
                               setSuccess('');
                             }}
@@ -1876,6 +2011,54 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
                   <div className="empty">Nenhuma OS encontrada nesse mês.</div>
                 )}
               </article>
+              <article className="panel section-panel report-movements">
+                <div className="panel-head">
+                  <div>
+                    <h2>Movimentações de estoque</h2>
+                    <p>Entradas e saídas registradas no mês selecionado.</p>
+                  </div>
+                  {!reportsLoading && reportMovements.length > 0 && (
+                    <div className="movement-report-totals">
+                      <span className="movement-entry-total">
+                        Entradas: {reportMovementTotals.incomingCount} · {reportMovementTotals.incoming.toLocaleString('pt-BR')} un.
+                      </span>
+                      <span className="movement-exit-total">
+                        Saídas: {reportMovementTotals.outgoingCount} · {reportMovementTotals.outgoing.toLocaleString('pt-BR')} un.
+                      </span>
+                    </div>
+                  )}
+                </div>
+                {reportsLoading && <div className="empty">Carregando movimentações...</div>}
+                {!reportsLoading && reportMovements.map(movement => {
+                  const piece = Array.isArray(movement.pecas)
+                    ? movement.pecas[0]
+                    : movement.pecas;
+                  const isEntry = movement.tipo === 'entrada';
+                  const quantity = Math.abs(Number(movement.quantidade));
+
+                  return (
+                    <div className="stock-movement-report-row" key={movement.id}>
+                      <span className={`movement-kind ${isEntry ? 'entry' : 'exit'}`}>
+                        {isEntry ? 'Entrada' : 'Saída'}
+                      </span>
+                      <div className="stock-movement-report-info">
+                        <b>{piece?.nome ?? `Peça #${movement.peca_id}`}</b>
+                        <small>
+                          {[
+                            piece?.codigo,
+                            piece?.unidade ? `${quantity.toLocaleString('pt-BR')} ${piece.unidade}` : quantity.toLocaleString('pt-BR'),
+                          ].filter(Boolean).join(' · ')}
+                          {movement.motivo ? ` · ${movement.motivo}` : ''}
+                        </small>
+                      </div>
+                      <time>{formatDate(movement.criado_em)}</time>
+                    </div>
+                  );
+                })}
+                {!reportsLoading && reportMovements.length === 0 && !reportsError && (
+                  <div className="empty">Nenhuma movimentação de estoque nesse mês.</div>
+                )}
+              </article>
             </section>
           )}
 
@@ -1962,9 +2145,34 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
             {printOrder.notes && <div className="print-field"><span>Observações</span><p>{printOrder.notes}</p></div>}
           </section>
 
+          {printOrder.parts.length > 0 && (
+            <section className="print-section print-parts">
+              <h2>Peças em uso na ordem</h2>
+              {printOrder.parts.map(part => (
+                <div className="print-part-row" key={part.id}>
+                  <span>
+                    {part.name}{part.code ? ` (${part.code})` : ''}
+                    <small>{part.quantity} × {money(part.unitPrice)}</small>
+                  </span>
+                  <b>{money(part.quantity * part.unitPrice)}</b>
+                </div>
+              ))}
+              <div className="print-part-total">
+                <span>Total das peças</span>
+                <b>{money(printOrder.parts.reduce((total, part) => total + part.quantity * part.unitPrice, 0))}</b>
+              </div>
+            </section>
+          )}
+
           <section className="print-section print-values">
             <h2>Valores</h2>
             <div><span>Mão de obra</span><b>{money(printOrder.labor)}</b></div>
+            {printOrder.parts.length > 0 && (
+              <div>
+                <span>Peças</span>
+                <b>{money(printOrder.parts.reduce((total, part) => total + part.quantity * part.unitPrice, 0))}</b>
+              </div>
+            )}
             <div><span>Desconto</span><b>{money(printOrder.discount)}</b></div>
             <div className="print-total"><span>Total da ordem</span><b>{money(printOrder.value)}</b></div>
             <p>Garantia do serviço: {printOrder.warrantyDays} dias, conforme condições aplicáveis.</p>
@@ -2250,6 +2458,50 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
             <label>Defeito relatado
               <textarea rows={3} value={orderProblem} onChange={event => setOrderProblem(event.target.value)} />
             </label>
+            <section className="order-parts-picker" aria-label="Peças do estoque para esta ordem">
+              <div className="order-parts-heading">
+                <div>
+                  <b>Peças do estoque</b>
+                  <small>Informe a quantidade a usar; será descontada do saldo.</small>
+                </div>
+              </div>
+              {stock.length === 0 ? (
+                <p className="order-parts-empty">Nenhuma peça ativa cadastrada no estoque.</p>
+              ) : (
+                stock.map(item => (
+                  <div className="order-part-option" key={item.id}>
+                    <div>
+                      <b>{item.nome}</b>
+                      <small>
+                        {item.codigo ? `${item.codigo} · ` : ''}
+                        {money(Number(item.preco_venda))} / {item.unidade}
+                        {' · '}Disponível: {Number(item.quantidade_atual)} {item.unidade}
+                      </small>
+                    </div>
+                    <input
+                      type="number"
+                      min="0.001"
+                      max={Number(item.quantidade_atual)}
+                      step="0.001"
+                      value={orderPartQuantities[item.id] ?? ''}
+                      onChange={event => setOrderPartQuantities({
+                        ...orderPartQuantities,
+                        [item.id]: event.target.value,
+                      })}
+                      aria-label={`Quantidade de ${item.nome} na OS`}
+                      placeholder="Qtd."
+                    />
+                  </div>
+                ))
+              )}
+              <div className="order-parts-total">
+                <span>Total das peças</span><b>{money(orderPartsTotal)}</b>
+              </div>
+              <div className="order-parts-total order-estimated-total">
+                <span>Total estimado da OS</span>
+                <b>{money(Math.max(0, Number(orderLabor || 0) + orderPartsTotal - Number(orderDiscount || 0)))}</b>
+              </div>
+            </section>
             <div className="form-grid">
               <label>Prioridade
                 <select value={orderPriority} onChange={event => setOrderPriority(event.target.value)}>
@@ -2261,12 +2513,30 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
               </label>
               <label>Previsão de entrega<input type="date" value={orderDueDate} onChange={event => setOrderDueDate(event.target.value)} /></label>
               <label>Mão de obra (R$)<input type="number" min="0" step="0.01" value={orderLabor} onChange={event => setOrderLabor(event.target.value)} /></label>
-              <label>Desconto (R$)<input type="number" min="0" step="0.01" value={orderDiscount} onChange={event => setOrderDiscount(event.target.value)} /></label>
+              <label>Desconto (R$)
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={orderDiscount}
+                  onChange={event => setOrderDiscount(event.target.value)}
+                  aria-invalid={discountExceedsLabor}
+                  aria-describedby={discountExceedsLabor ? 'order-discount-warning' : undefined}
+                />
+              </label>
             </div>
+            {discountExceedsLabor && (
+              <div className="discount-warning" id="order-discount-warning" role="alert">
+                <Wrench size={17} />
+                <span>
+                  <b>Desconto maior que a mão de obra.</b> O desconto não pode ultrapassar o valor informado de mão de obra ({money(laborAmount)}).
+                </span>
+              </div>
+            )}
 
             <div className="modal-actions">
               <button className="secondary" type="button" onClick={() => setModal(false)}>Cancelar</button>
-              <button className="primary" type="submit" disabled={saving || clients.length === 0}>
+              <button className="primary" type="submit" disabled={saving || clients.length === 0 || discountExceedsLabor}>
                 {saving ? 'Salvando...' : 'Criar ordem'}
               </button>
             </div>
@@ -2287,17 +2557,55 @@ export default function App({ userEmail, userId, onLogout }: AppProps) {
               {stockMoveItem.nome}: saldo atual {Number(stockMoveItem.quantidade_atual)} {stockMoveItem.unidade}.
             </p>
             <label>Tipo
-              <select value={stockMoveType} onChange={event => setStockMoveType(event.target.value as 'entrada' | 'saida')}>
+              <select
+                value={stockMoveType}
+                onChange={event => {
+                  setStockMoveType(event.target.value as 'entrada' | 'saida');
+                  setStockMoveError('');
+                }}
+              >
                 <option value="entrada">Entrada</option>
                 <option value="saida">Saída</option>
               </select>
             </label>
             <label>Quantidade
-              <input type="number" min="0.001" step="0.001" required value={stockMoveQuantity} onChange={event => setStockMoveQuantity(event.target.value)} />
+              <input
+                type="number"
+                min="0.001"
+                max={stockMoveType === 'saida' ? Number(stockMoveItem.quantidade_atual) : undefined}
+                step="0.001"
+                required
+                value={stockMoveQuantity}
+                onChange={event => {
+                  setStockMoveQuantity(event.target.value);
+                  setStockMoveError('');
+                }}
+              />
             </label>
+            {stockMoveError && (
+              <div className="stock-movement-error" role="alert">
+                <Wrench size={18} />
+                <span><b>Movimentação não realizada.</b> {stockMoveError}</span>
+              </div>
+            )}
+            {!stockMoveError
+              && stockMoveType === 'saida'
+              && Number(stockMoveQuantity) > Number(stockMoveItem.quantidade_atual)
+              && (
+                <div className="stock-movement-error" role="alert">
+                  <Wrench size={18} />
+                  <span>
+                    <b>Saldo insuficiente.</b> Disponível: {Number(stockMoveItem.quantidade_atual)} {stockMoveItem.unidade}.
+                    Reduza a quantidade para continuar.
+                  </span>
+                </div>
+              )}
             <label>Motivo<input maxLength={500} value={stockMoveReason} onChange={event => setStockMoveReason(event.target.value)} /></label>
             <div className="modal-actions">
-              <button className="secondary" type="button" onClick={() => setStockMoveItem(null)}>Cancelar</button>
+              <button className="secondary" type="button" onClick={() => {
+                setStockMoveItem(null);
+                setStockMoveError('');
+              }}>Cancelar</button>
               <button className="primary" type="submit" disabled={saving}>
                 {saving ? 'Salvando...' : 'Registrar'}
               </button>

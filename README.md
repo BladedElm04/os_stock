@@ -41,6 +41,7 @@ Confira o nome da branch com `git branch --show-current`.
 2. Copie `.env.example` para `.env.local`.
 3. Preencha `VITE_SUPABASE_URL` e `VITE_SUPABASE_PUBLISHABLE_KEY`.
 4. Configure políticas RLS para usuários autenticados lerem e alterarem os dados necessários.
-5. Nunca coloque `service_role` no frontend, APK ou Git.
+5. O banco Supabase deve ter a estrutura de peças vinculadas às OS e a função transacional de criação de OS já implantadas.
+6. Nunca coloque `service_role` no frontend, APK ou Git.
 
-O app consulta ordens, clientes, equipamentos e peças no Supabase. Também permite cadastrar e editar clientes e peças, desativar cadastros preservando o histórico, cadastrar e listar equipamentos por cliente, consultar relatórios mensais de ordens por status e valores, configurar o nome do perfil, atualizar o status das ordens, editar diagnóstico/serviço/observações, registrar entradas/saídas de estoque e imprimir ordens de serviço ou salvá-las como PDF pelo navegador.
+O app consulta ordens, clientes, equipamentos e peças no Supabase. Também permite cadastrar e editar clientes e peças, desativar cadastros preservando o histórico, cadastrar e listar equipamentos por cliente, consultar relatórios mensais de ordens por status e valores, configurar o nome do perfil, atualizar o status das ordens, editar diagnóstico/serviço/observações, registrar entradas/saídas de estoque e imprimir ordens de serviço ou salvá-las como PDF pelo navegador. Ao criar uma OS, é possível incluir peças do estoque; o preço de venda cadastrado é gravado como valor histórico, a quantidade é descontada em uma transação e a peça fica registrada como “em uso” na ordem.
