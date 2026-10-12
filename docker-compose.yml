@@ -1,0 +1,7 @@
+services:
+  os-stock:
+    build: .
+    container_name: os_stock_web
+    ports:
+      - "8085:80"
+    restart: unless-stopped
