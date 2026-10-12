@@ -95,13 +95,11 @@ export default function AuthGate() {
 
     if (session) {
         return (
-            <>
-                <div className="session-bar">
-                    <span>Conectado: {session.user.email}</span>
-                    <button onClick={handleLogout}>Sair</button>
-                </div>
-                <App />
-            </>
+            <App
+                userEmail={session.user.email ?? 'Usuário'}
+                userId={session.user.id}
+                onLogout={() => void handleLogout()}
+            />
         );
     }
 
